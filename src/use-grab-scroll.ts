@@ -22,13 +22,13 @@ const claimedPresses = new WeakSet<PointerEvent>()
  * When nested containers both use it, a drag inside the inner one scrolls only the inner one.
  *
  * Only the mouse is handled, because touch screens scroll the container natively.
- * The click that ends a drag is suppressed, so that links inside the container do not open.
+ * The click that ends a drag is suppressed, so that it does not activate links or buttons inside the container.
  * Links, images, and `draggable` elements in the container cannot be dragged with native drag and drop, because that would interrupt the scrolling.
  *
  * Call it in `setup` or inside an effect scope, which removes its listeners when it stops.
  */
 export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) {
-  let endGesture: ((released: boolean) => void) | undefined
+  let endGesture: (() => void) | undefined
   let releaseClick: (() => void) | undefined
 
   useEventListener(target, "pointerdown", (event: PointerEvent) => {
@@ -43,12 +43,16 @@ export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) 
     }
 
     claimedPresses.add(event)
-    endGesture?.(false)
-    endGesture = startGesture(element, event, releasedAfterDrag => {
+    endGesture?.()
+    endGesture = startGesture(element, event, releaseAfterDrag => {
       endGesture = undefined
-      if (releasedAfterDrag) {
+      if (releaseAfterDrag) {
         releaseClick?.()
-        releaseClick = suppressNextClick(element, () => (releaseClick = undefined))
+        releaseClick = suppressClickAfterRelease(
+          element,
+          releaseAfterDrag,
+          () => (releaseClick = undefined),
+        )
       }
     })
   })
@@ -59,7 +63,7 @@ export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) 
   })
 
   const reset = () => {
-    endGesture?.(false)
+    endGesture?.()
     releaseClick?.()
   }
 
@@ -73,13 +77,13 @@ export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) 
  *
  * The gesture listens to the element's own window, which differs from the global one inside an iframe.
  * It listens to pointer events in the capture phase, so that handlers in the page that stop propagation do not hide the pointer from it.
- * When the gesture ends, it calls `onEnd` with whether the mouse was released after a drag, as opposed to after a click or on cancellation.
+ * When the gesture ends, it calls `onEnd` with the `pointerup` event that released the mouse after a drag, or with `undefined` if the pointer never reached the drag threshold or the gesture is cancelled.
  */
 function startGesture(
   element: HTMLElement,
   press: PointerEvent,
-  onEnd: (releasedAfterDrag: boolean) => void,
-): (released: boolean) => void {
+  onEnd: (releaseAfterDrag: PointerEvent | undefined) => void,
+): () => void {
   const view = element.ownerDocument.defaultView
   if (!view) {
     return () => {}
@@ -93,7 +97,7 @@ function startGesture(
   }
   let restoreStyles: (() => void) | undefined
 
-  const end = (released: boolean) => {
+  const end = (release?: PointerEvent) => {
     view.removeEventListener("pointermove", onMove, { capture: true })
     view.removeEventListener("pointerup", onUp, { capture: true })
     view.removeEventListener("pointercancel", onCancel, { capture: true })
@@ -101,7 +105,7 @@ function startGesture(
     const dragged = Boolean(restoreStyles)
     restoreStyles?.()
     restoreStyles = undefined
-    onEnd(released && dragged)
+    onEnd(dragged ? release : undefined)
   }
 
   const onMove = (event: PointerEvent) => {
@@ -111,7 +115,7 @@ function startGesture(
 
     // The release can be lost, such as when the mouse is released outside the window.
     if (!(event.buttons & 1)) {
-      end(false)
+      end()
       return
     }
 
@@ -135,18 +139,18 @@ function startGesture(
 
   const onUp = (event: PointerEvent) => {
     if (event.pointerId === press.pointerId) {
-      end(true)
+      end(event)
     }
   }
 
   const onCancel = (event: PointerEvent) => {
     if (event.pointerId === press.pointerId) {
-      end(false)
+      end()
     }
   }
 
   // The mouse can be released in another window while this one has no focus.
-  const onBlur = () => end(false)
+  const onBlur = () => end()
 
   view.addEventListener("pointermove", onMove, { capture: true })
   view.addEventListener("pointerup", onUp, { capture: true })
@@ -154,7 +158,7 @@ function startGesture(
   // Not in the capture phase, which would also catch elements losing focus.
   view.addEventListener("blur", onBlur)
 
-  return end
+  return () => end()
 }
 
 /**
@@ -191,20 +195,32 @@ function overrideStyles(element: HTMLElement) {
   }
 }
 
-/** Suppresses the next click on the element, and returns the function that stops suppressing it, which also calls `onRelease`. */
-function suppressNextClick(element: HTMLElement, onRelease: () => void) {
+/**
+ * Suppresses the click on the element that follows the mouse release, and returns the function that stops suppressing it, which also calls `onRelease`.
+ *
+ * Clicks that handlers dispatch while the release event is still being dispatched, such as by calling `click()` on a button, go through.
+ */
+function suppressClickAfterRelease(
+  element: HTMLElement,
+  release: PointerEvent,
+  onRelease: () => void,
+) {
   const preventClick = (event: MouseEvent) => {
+    if (release.eventPhase !== Event.NONE) {
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
+    stop()
   }
-  const release = () => {
+  const stop = () => {
     clearTimeout(timeout)
     element.removeEventListener("click", preventClick, { capture: true })
     onRelease()
   }
 
-  // The click arrives right after pointerup in the same task; if it does not, the next task stops waiting for it.
-  element.addEventListener("click", preventClick, { capture: true, once: true })
-  const timeout = setTimeout(release)
-  return release
+  // The click follows the release in the same task; if no click follows, the timeout removes the listener.
+  element.addEventListener("click", preventClick, { capture: true })
+  const timeout = setTimeout(stop)
+  return stop
 }

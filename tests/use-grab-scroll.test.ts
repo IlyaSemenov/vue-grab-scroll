@@ -166,6 +166,18 @@ describe("clicks", () => {
     expect(clickLink()).toEqual(suppressedClick)
   })
 
+  it("allows a button click during pointerup and suppresses the drag-ending click", () => {
+    const button = document.createElement("button")
+    container.append(button)
+    const buttonClicks: MouseEvent[] = []
+    button.addEventListener("click", event => buttonClicks.push(event))
+    link.addEventListener("pointerup", () => button.click())
+    drag(link, start, end)
+    expect(buttonClicks.map(event => event.defaultPrevented)).toEqual([false])
+    expect(clickLink()).toEqual(suppressedClick)
+    expect(clickLink()).toEqual(passedClick)
+  })
+
   it("stops suppressing clicks when the target changes", async () => {
     drag(link, start, end)
     target.value = document.createElement("div")

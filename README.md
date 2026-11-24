@@ -46,7 +46,7 @@ Dragging with the primary mouse button scrolls the container in both directions,
 When nested containers both use grab scrolling, a drag inside the inner one scrolls only the inner one.
 
 A press becomes a drag once the mouse moves 5 px away from where it was pressed; until then, it remains a click.
-The click that ends a drag is suppressed, so links and buttons inside the container do not fire when the user releases the mouse after dragging.
+The click that ends a drag is suppressed, so that it does not activate links or buttons inside the container.
 
 During a drag, the container's scroll snapping and text selection are turned off.
 
