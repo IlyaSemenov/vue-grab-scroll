@@ -50,6 +50,22 @@ useGrabScroll(track, { axis: "x" })
 
 `axis` accepts `"x"`, `"y"`, or `"both"`, the default, as a value, a ref, or a getter; a drag uses the value it had when the mouse was pressed.
 
+### Leaving presses alone
+
+To let a drag-and-drop library handle presses on movable cards, set `ignore` in the directive value or the composable options:
+
+```vue
+<div v-grab-scroll.x="{ ignore: '.movable' }">…</div>
+```
+
+```ts
+useGrabScroll(board, { ignore: ".movable" })
+```
+
+`ignore` is a CSS selector or a function that receives the `pointerdown` event and returns `true` to leave the press alone.
+The selector is tested against the pressed element and each ancestor up to and including the grab-scroll container.
+The composable also accepts a ref of either; a change applies from the next press.
+
 ## Behavior
 
 Dragging with the primary mouse button scrolls the container along each of its axes where its content overflows; touch screens keep their native scrolling.
@@ -61,4 +77,5 @@ The click that ends a drag is suppressed, so that it does not activate links or 
 
 During a drag, the container's scroll snapping and text selection are turned off.
 
-Links, images, and `draggable` elements in the container cannot be dragged with native drag and drop, because that would interrupt the scrolling.
+When `ignore` matches a press, no grab-scroll container on its event path starts scrolling, and the package leaves its click and native drag and drop to the application.
+On other presses, links, images, and `draggable` elements in the container cannot be dragged with native drag and drop, because that would interrupt the scrolling.

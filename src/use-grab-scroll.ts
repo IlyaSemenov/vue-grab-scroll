@@ -1,14 +1,27 @@
 import { tryOnScopeDispose, useEventListener } from "@vueuse/core"
-import type { MaybeRefOrGetter, ShallowRef } from "vue"
-import { toValue, watch } from "vue"
+import type { MaybeRef, MaybeRefOrGetter, ShallowRef } from "vue"
+import { toValue, unref, watch } from "vue"
 
 /** Axes along which a container scrolls: horizontal, vertical, or both. */
 export type GrabScrollAxis = "x" | "y" | "both"
+
+/**
+ * Presses that a container leaves alone: a CSS selector, or a function that receives the `pointerdown` event and returns whether to leave the press alone.
+ *
+ * The selector is tested against the pressed element and each ancestor up to and including the grab-scroll container.
+ */
+export type GrabScrollIgnore = string | ((press: PointerEvent) => boolean)
 
 /** Options of {@link useGrabScroll}. */
 export interface GrabScrollOptions {
   /** Axes along which the container scrolls; the default is both. */
   axis?: MaybeRefOrGetter<GrabScrollAxis>
+  /**
+   * Presses that the container leaves alone, so that other handlers, such as a drag-and-drop library, can take them.
+   *
+   * It is a value or a ref, not a getter, because a function value is the predicate itself.
+   */
+  ignore?: MaybeRef<GrabScrollIgnore | undefined>
 }
 
 /** Whether a gesture scrolls the container along each axis. */
@@ -37,6 +50,9 @@ const claimedAxes = new WeakMap<PointerEvent, Axes>()
  */
 const releaseSuppressions = new WeakMap<PointerEvent, Set<() => void>>()
 
+/** Presses that a container has left alone, which no container scrolls and native drag and drop may follow. */
+const ignoredPresses = new WeakSet<PointerEvent>()
+
 /**
  * Scrolls a container when the user drags it with the mouse.
  *
@@ -45,7 +61,9 @@ const releaseSuppressions = new WeakMap<PointerEvent, Set<() => void>>()
  *
  * Only the mouse is handled, because touch screens scroll the container natively.
  * The click that ends a drag is suppressed, so that it does not activate links or buttons inside the container.
- * Links, images, and `draggable` elements in the container cannot be dragged with native drag and drop, because that would interrupt the scrolling.
+ *
+ * When `ignore` matches a press, no grab-scroll container on its event path starts scrolling, and the package leaves its click and native drag and drop to the application.
+ * On other presses, links, images, and `draggable` elements in the container cannot be dragged with native drag and drop, because that would interrupt the scrolling.
  *
  * Call it in `setup` or inside an effect scope, which removes its listeners when it stops.
  */
@@ -53,12 +71,47 @@ export function useGrabScroll(
   target: Readonly<ShallowRef<HTMLElement | null>>,
   options: GrabScrollOptions = {},
 ) {
-  let endGesture: (() => void) | undefined
+  let endGesture: ((release?: PointerEvent) => void) | undefined
   let releaseClick: (() => void) | undefined
+  /** The mouse press in the container while it lasts, which decides whether native drag and drop may start. */
+  let currentPress: PointerEvent | undefined
+  let stopWatchingPress: (() => void) | undefined
+
+  /** Ends the current press and its gesture, which receives the `pointerup` event that released the mouse, if any. */
+  const endPress = (release?: PointerEvent) => {
+    stopWatchingPress?.()
+    stopWatchingPress = undefined
+    currentPress = undefined
+    endGesture?.(release)
+  }
+
+  // In the capture phase, so that the press is left alone before handlers inside the container, which may stop its propagation, see it, and before nested containers start a gesture.
+  useEventListener(
+    target,
+    "pointerdown",
+    (event: PointerEvent) => {
+      const element = target.value
+      if (!element || !isPrimaryMousePress(event)) {
+        return
+      }
+      endPress()
+      currentPress = event
+      stopWatchingPress = watchPressEnd(element, event, release => {
+        // The watcher has stopped itself.
+        stopWatchingPress = undefined
+        endPress(release)
+      })
+      if (isIgnored(element, event, unref(options.ignore))) {
+        ignoredPresses.add(event)
+      }
+    },
+    { capture: true },
+  )
 
   useEventListener(target, "pointerdown", (event: PointerEvent) => {
     const element = target.value
-    if (event.pointerType !== "mouse" || event.button !== 0 || !element) {
+    // A child handler can end the press before pointerdown bubbles back to the container, for example by moving focus to another window.
+    if (!element || event !== currentPress || ignoredPresses.has(event)) {
       return
     }
     const axes = claimAxes(event, toValue(options.axis) ?? "both")
@@ -66,7 +119,6 @@ export function useGrabScroll(
       return
     }
 
-    endGesture?.()
     endGesture = startGesture(element, event, axes, releaseAfterDrag => {
       endGesture = undefined
       if (releaseAfterDrag) {
@@ -81,18 +133,46 @@ export function useGrabScroll(
   })
 
   // In the capture phase, so that handlers inside the container that stop propagation do not let a drag start.
-  useEventListener(target, "dragstart", (event: DragEvent) => event.preventDefault(), {
-    capture: true,
-  })
+  useEventListener(
+    target,
+    "dragstart",
+    (event: DragEvent) => {
+      if (!currentPress || !ignoredPresses.has(currentPress)) {
+        event.preventDefault()
+      }
+    },
+    { capture: true },
+  )
 
   const reset = () => {
-    endGesture?.()
+    endPress()
     releaseClick?.()
   }
 
   // The gesture and the click suppression belong to the element that was pressed.
   watch(target, reset)
   tryOnScopeDispose(reset)
+}
+
+/** Returns whether the press is made with the primary mouse button, the only one that drags a container. */
+function isPrimaryMousePress(press: PointerEvent): boolean {
+  return press.pointerType === "mouse" && press.button === 0
+}
+
+/** Returns whether the container leaves the press alone, as {@link GrabScrollIgnore} describes. */
+function isIgnored(
+  container: HTMLElement,
+  press: PointerEvent,
+  ignore: GrabScrollIgnore | undefined,
+): boolean {
+  if (typeof ignore === "function") {
+    return ignore(press)
+  }
+  if (!ignore) {
+    return false
+  }
+  const match = (press.target as Element).closest(ignore)
+  return Boolean(match && container.contains(match))
 }
 
 /**
@@ -109,18 +189,18 @@ function claimAxes(press: PointerEvent, axis: GrabScrollAxis): Axes | undefined 
 }
 
 /**
- * Starts following a mouse press on the element along the axes, and returns the function that ends the gesture.
+ * Starts following the moves of a mouse press on the element along the axes, and returns the function that ends the gesture.
  *
- * The gesture listens to the element's own window, which differs from the global one inside an iframe.
- * It listens to pointer events in the capture phase, so that handlers in the page that stop propagation do not hide the pointer from it.
- * When the gesture ends, it calls `onEnd` with the `pointerup` event that released the mouse after a drag, or with `undefined` if the pointer never reached the drag threshold or the gesture is cancelled.
+ * The caller ends the gesture when the press ends, with the `pointerup` event that released the mouse, or without one when the press is cancelled.
+ * The gesture listens to moves in the element's own window, which differs from the global one inside an iframe, in the capture phase, so that handlers in the page that stop propagation do not hide the pointer from it.
+ * When the gesture ends, it calls `onEnd` with the `pointerup` event that released the mouse after a drag, or with `undefined` if the pointer never reached the drag threshold or the press was cancelled.
  */
 function startGesture(
   element: HTMLElement,
   press: PointerEvent,
   axes: Axes,
   onEnd: (releaseAfterDrag: PointerEvent | undefined) => void,
-): () => void {
+): (release?: PointerEvent) => void {
   const view = element.ownerDocument.defaultView
   if (!view) {
     return () => {}
@@ -133,12 +213,11 @@ function startGesture(
     scrollTop: element.scrollTop,
   }
   let restoreStyles: (() => void) | undefined
+  let ended = false
 
   const end = (release?: PointerEvent) => {
+    ended = true
     view.removeEventListener("pointermove", onMove, { capture: true })
-    view.removeEventListener("pointerup", onUp, { capture: true })
-    view.removeEventListener("pointercancel", onCancel, { capture: true })
-    view.removeEventListener("blur", onBlur)
     const dragged = Boolean(restoreStyles)
     restoreStyles?.()
     restoreStyles = undefined
@@ -146,13 +225,8 @@ function startGesture(
   }
 
   const onMove = (event: PointerEvent) => {
-    if (event.pointerId !== press.pointerId) {
-      return
-    }
-
-    // The release can be lost, such as when the mouse is released outside the window.
-    if (!(event.buttons & 1)) {
-      end()
+    // A move that shows a lost release can end the gesture during its own dispatch, before this listener runs.
+    if (ended || event.pointerId !== press.pointerId) {
       return
     }
 
@@ -176,28 +250,71 @@ function startGesture(
     })
   }
 
+  view.addEventListener("pointermove", onMove, { capture: true })
+  return end
+}
+
+/**
+ * Waits for the end of a mouse press on the element, and returns the function that stops waiting.
+ *
+ * When the press ends, it stops waiting and calls `onEnd` once, with the `pointerup` event that released the mouse, or with `undefined` when the pointer is cancelled, its release is lost, or the window loses focus.
+ * A release is lost when the mouse moves without the primary button or presses again, wherever in the window.
+ * It listens to the element's own window, in the capture phase for pointer events, so that handlers that stop propagation do not hide the end.
+ */
+function watchPressEnd(
+  element: HTMLElement,
+  press: PointerEvent,
+  onEnd: (release?: PointerEvent) => void,
+): () => void {
+  const view = element.ownerDocument.defaultView
+  if (!view) {
+    return () => {}
+  }
+
+  const stop = () => {
+    view.removeEventListener("pointerup", onUp, { capture: true })
+    view.removeEventListener("pointercancel", onCancel, { capture: true })
+    view.removeEventListener("pointermove", onMove, { capture: true })
+    view.removeEventListener("pointerdown", onDown, { capture: true })
+    view.removeEventListener("blur", onBlur)
+  }
+  const end = (release?: PointerEvent) => {
+    stop()
+    onEnd(release)
+  }
+
   const onUp = (event: PointerEvent) => {
     if (event.pointerId === press.pointerId) {
       end(event)
     }
   }
-
   const onCancel = (event: PointerEvent) => {
     if (event.pointerId === press.pointerId) {
       end()
     }
   }
-
+  // The release can be lost, such as when the mouse is released outside the window.
+  const onMove = (event: PointerEvent) => {
+    if (event.pointerId === press.pointerId && !(event.buttons & 1)) {
+      end()
+    }
+  }
+  // In the window's capture phase, so that the press ends before any container handles the new one.
+  const onDown = (event: PointerEvent) => {
+    if (event.pointerId === press.pointerId) {
+      end()
+    }
+  }
   // The mouse can be released in another window while this one has no focus.
   const onBlur = () => end()
 
-  view.addEventListener("pointermove", onMove, { capture: true })
   view.addEventListener("pointerup", onUp, { capture: true })
   view.addEventListener("pointercancel", onCancel, { capture: true })
+  view.addEventListener("pointermove", onMove, { capture: true })
+  view.addEventListener("pointerdown", onDown, { capture: true })
   // Not in the capture phase, which would also catch elements losing focus.
   view.addEventListener("blur", onBlur)
-
-  return () => end()
+  return stop
 }
 
 /**

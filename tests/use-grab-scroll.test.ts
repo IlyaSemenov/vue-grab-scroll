@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 
 import type { EffectScope, Ref, ShallowRef } from "vue"
 import { effectScope, nextTick, ref, shallowRef } from "vue"
-import type { GrabScrollAxis } from "vue-grab-scroll"
+import type { GrabScrollAxis, GrabScrollIgnore } from "vue-grab-scroll"
 import { useGrabScroll } from "vue-grab-scroll"
 
 import { dispatchPointer, drag } from "./pointer"
@@ -422,6 +422,16 @@ describe("ending a drag early", () => {
     expectDragCancelled()
   })
 
+  it("does not start a drag for a press that ends while a child handles it", () => {
+    link.addEventListener("pointerdown", () => window.dispatchEvent(new Event("blur")), {
+      once: true,
+    })
+    dispatchPointer(link, "pointerdown", start)
+    dispatchPointer(link, "pointermove", end)
+    expect(container.scrollLeft).toBe(100)
+    expect(container.style.userSelect).toBe("")
+  })
+
   it("cancels a drag when the target changes", async () => {
     startDrag()
     const replacement = document.createElement("div")
@@ -446,4 +456,146 @@ it("prevents native dragging of the container content", () => {
   const event = new DragEvent("dragstart", { bubbles: true, cancelable: true })
   link.dispatchEvent(event)
   expect(event.defaultPrevented).toBe(true)
+})
+
+describe("ignored presses", () => {
+  let ignore: ShallowRef<GrabScrollIgnore | undefined>
+  let element: HTMLElement
+  let card: HTMLElement
+  let cardContent: HTMLElement
+
+  // An element inside the container, so that the container shows whether an ancestor starts scrolling.
+  beforeEach(() => {
+    element = document.createElement("div")
+    card = document.createElement("div")
+    card.className = "card"
+    cardContent = document.createElement("span")
+    card.append(cardContent)
+    element.append(card)
+    container.append(element)
+    element.scrollLeft = 100
+    element.scrollTop = 100
+    ignore = shallowRef(".card")
+    scope.run(() => useGrabScroll(shallowRef(element), { ignore }))
+  })
+
+  it("leaves alone presses on elements that match the selector", () => {
+    drag(cardContent, start, end)
+    expect(element.scrollLeft).toBe(100)
+    expect(dispatchClick(card)).toEqual(passedClick)
+
+    drag(element, start, end)
+    expect(element.scrollLeft).toBe(200)
+  })
+
+  it("matches the selector on the container itself", () => {
+    ignore.value = ".board"
+    element.classList.add("board")
+    drag(cardContent, start, end)
+    expect(element.scrollLeft).toBe(100)
+    expect(dispatchClick(card)).toEqual(passedClick)
+  })
+
+  it("matches the selector only up to the container", () => {
+    container.classList.add("card")
+    drag(element, start, end)
+    expect(element.scrollLeft).toBe(200)
+  })
+
+  it("leaves alone presses for which the function returns true", () => {
+    const presses: PointerEvent[] = []
+    ignore.value = press => {
+      presses.push(press)
+      return press.target === card
+    }
+
+    drag(card, start, end)
+    expect(element.scrollLeft).toBe(100)
+
+    drag(element, start, end)
+    expect(element.scrollLeft).toBe(200)
+    expect(presses.map(press => press.type)).toEqual(["pointerdown", "pointerdown"])
+  })
+
+  it("keeps the containers around from scrolling on an ignored press", () => {
+    drag(cardContent, start, { x: 150, y: 150 })
+    expect([container.scrollLeft, container.scrollTop]).toEqual([100, 100])
+  })
+
+  it("keeps nested containers from scrolling on an ignored press", () => {
+    const inner = document.createElement("div")
+    const innerCard = document.createElement("div")
+    innerCard.className = "card"
+    inner.append(innerCard)
+    element.append(inner)
+    inner.scrollLeft = 100
+    scope.run(() => useGrabScroll(shallowRef(inner)))
+
+    drag(innerCard, start, end)
+    expect(inner.scrollLeft).toBe(100)
+    expect(dispatchClick(innerCard)).toEqual(passedClick)
+  })
+
+  it("ends the previous drag when an ignored press follows a lost release", () => {
+    dispatchPointer(element, "pointerdown", start)
+    dispatchPointer(element, "pointermove", { x: 180, y: 200 })
+    expect(element.scrollLeft).toBe(120)
+
+    dispatchPointer(cardContent, "pointerdown", start)
+    expect(element.style.userSelect).toBe("")
+    dispatchPointer(cardContent, "pointermove", end)
+    dispatchPointer(cardContent, "pointerup", end)
+    expect(element.scrollLeft).toBe(120)
+    expect(dispatchClick(card)).toEqual(passedClick)
+  })
+
+  it("ends a sibling container's drag when an ignored press follows a lost release", () => {
+    const sibling = document.createElement("div")
+    element.append(sibling)
+    scope.run(() => useGrabScroll(shallowRef(sibling)))
+
+    dispatchPointer(sibling, "pointerdown", start)
+    dispatchPointer(sibling, "pointermove", { x: 180, y: 200 })
+    expect(sibling.scrollLeft).toBe(20)
+
+    dispatchPointer(cardContent, "pointerdown", start)
+    expect(sibling.style.userSelect).toBe("")
+    dispatchPointer(cardContent, "pointermove", end)
+    dispatchPointer(cardContent, "pointerup", end)
+    expect(sibling.scrollLeft).toBe(20)
+    expect(dispatchClick(card)).toEqual(passedClick)
+  })
+
+  it("lets native drag and drop follow an ignored press", () => {
+    /** Dispatches `dragstart` on the target and returns whether its default action was prevented. */
+    function dispatchDragStart(target: Element) {
+      const event = new DragEvent("dragstart", { bubbles: true, cancelable: true })
+      target.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+
+    dispatchPointer(card, "pointerdown", start)
+    expect(dispatchDragStart(card)).toBe(false)
+    // Presses of other pointers do not replace the mouse press.
+    dispatchPointer(element, "pointerdown", start, { pointerType: "touch", pointerId: 2 })
+    expect(dispatchDragStart(card)).toBe(false)
+    dispatchPointer(card, "pointerup", start)
+
+    // A handler that stops the propagation of an ignored press does not keep it from being ignored.
+    card.addEventListener("pointerdown", event => event.stopPropagation(), { once: true })
+    dispatchPointer(cardContent, "pointerdown", start)
+    expect(dispatchDragStart(card)).toBe(false)
+    dispatchPointer(card, "pointerup", start)
+
+    // The ignored press ends with its release, so a later press of another pointer does not inherit it.
+    dispatchPointer(element, "pointerdown", start, { pointerType: "pen", pointerId: 3 })
+    expect(dispatchDragStart(element)).toBe(true)
+
+    // A later press is not ignored, even when a child stops its propagation before the container sees it.
+    const stopping = document.createElement("div")
+    element.append(stopping)
+    stopping.addEventListener("pointerdown", event => event.stopPropagation())
+    dispatchPointer(stopping, "pointerdown", start)
+    expect(dispatchDragStart(stopping)).toBe(true)
+  })
 })
