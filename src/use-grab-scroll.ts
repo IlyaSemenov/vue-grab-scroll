@@ -1,8 +1,23 @@
 import { tryOnScopeDispose, useEventListener } from "@vueuse/core"
-import type { ShallowRef } from "vue"
-import { watch } from "vue"
+import type { MaybeRefOrGetter, ShallowRef } from "vue"
+import { toValue, watch } from "vue"
 
-/** Distance in px from the press point at which a press becomes a drag rather than a click. */
+/** Axes along which a container scrolls: horizontal, vertical, or both. */
+export type GrabScrollAxis = "x" | "y" | "both"
+
+/** Options of {@link useGrabScroll}. */
+export interface GrabScrollOptions {
+  /** Axes along which the container scrolls; the default is both. */
+  axis?: MaybeRefOrGetter<GrabScrollAxis>
+}
+
+/** Whether a gesture scrolls the container along each axis. */
+interface Axes {
+  x: boolean
+  y: boolean
+}
+
+/** Distance in px from the press point, measured along the axes that the container took for the press, at which the press becomes a drag rather than a click. */
 const DRAG_THRESHOLD = 5
 
 /**
@@ -12,14 +27,21 @@ const DRAG_THRESHOLD = 5
  */
 const DRAG_STYLES = ["scroll-snap-type", "user-select"] as const
 
-/** Presses that a container has already taken, so that the containers around it skip them. */
-const claimedPresses = new WeakSet<PointerEvent>()
+/** Axes of presses that containers have already taken, so that the containers around them scroll only along the other axes. */
+const claimedAxes = new WeakMap<PointerEvent, Axes>()
+
+/**
+ * Functions that stop the click suppressions of each release.
+ *
+ * Nested containers that a press dragged each suppress the click after its release, and the first one that suppresses it stops the others, so that they do not suppress a later click.
+ */
+const releaseSuppressions = new WeakMap<PointerEvent, Set<() => void>>()
 
 /**
  * Scrolls a container when the user drags it with the mouse.
  *
- * The container scrolls along both axes; an axis along which the container does not overflow stays still.
- * When nested containers both use it, a drag inside the inner one scrolls only the inner one.
+ * The container scrolls along both axes, unless `axis` limits it to one; an axis along which the container does not overflow stays still.
+ * When nested containers use it, each axis goes to the innermost container that selected it, even if its content fits.
  *
  * Only the mouse is handled, because touch screens scroll the container natively.
  * The click that ends a drag is suppressed, so that it does not activate links or buttons inside the container.
@@ -27,24 +49,25 @@ const claimedPresses = new WeakSet<PointerEvent>()
  *
  * Call it in `setup` or inside an effect scope, which removes its listeners when it stops.
  */
-export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) {
+export function useGrabScroll(
+  target: Readonly<ShallowRef<HTMLElement | null>>,
+  options: GrabScrollOptions = {},
+) {
   let endGesture: (() => void) | undefined
   let releaseClick: (() => void) | undefined
 
   useEventListener(target, "pointerdown", (event: PointerEvent) => {
     const element = target.value
-    if (
-      event.pointerType !== "mouse" ||
-      event.button !== 0 ||
-      !element ||
-      claimedPresses.has(event)
-    ) {
+    if (event.pointerType !== "mouse" || event.button !== 0 || !element) {
+      return
+    }
+    const axes = claimAxes(event, toValue(options.axis) ?? "both")
+    if (!axes) {
       return
     }
 
-    claimedPresses.add(event)
     endGesture?.()
-    endGesture = startGesture(element, event, releaseAfterDrag => {
+    endGesture = startGesture(element, event, axes, releaseAfterDrag => {
       endGesture = undefined
       if (releaseAfterDrag) {
         releaseClick?.()
@@ -73,7 +96,20 @@ export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) 
 }
 
 /**
- * Starts following a mouse press on the element, and returns the function that ends the gesture.
+ * Takes the axes of the press that the axis setting allows and no container inside has taken, and returns them, or `undefined` if none are left.
+ */
+function claimAxes(press: PointerEvent, axis: GrabScrollAxis): Axes | undefined {
+  const claimed = claimedAxes.get(press) ?? { x: false, y: false }
+  const axes = { x: axis !== "y" && !claimed.x, y: axis !== "x" && !claimed.y }
+  if (!axes.x && !axes.y) {
+    return undefined
+  }
+  claimedAxes.set(press, { x: claimed.x || axes.x, y: claimed.y || axes.y })
+  return axes
+}
+
+/**
+ * Starts following a mouse press on the element along the axes, and returns the function that ends the gesture.
  *
  * The gesture listens to the element's own window, which differs from the global one inside an iframe.
  * It listens to pointer events in the capture phase, so that handlers in the page that stop propagation do not hide the pointer from it.
@@ -82,6 +118,7 @@ export function useGrabScroll(target: Readonly<ShallowRef<HTMLElement | null>>) 
 function startGesture(
   element: HTMLElement,
   press: PointerEvent,
+  axes: Axes,
   onEnd: (releaseAfterDrag: PointerEvent | undefined) => void,
 ): () => void {
   const view = element.ownerDocument.defaultView
@@ -119,8 +156,9 @@ function startGesture(
       return
     }
 
-    const offsetX = event.clientX - start.x
-    const offsetY = event.clientY - start.y
+    // Moves along the other axes neither start a drag nor scroll.
+    const offsetX = axes.x ? event.clientX - start.x : 0
+    const offsetY = axes.y ? event.clientY - start.y : 0
     if (!restoreStyles) {
       if (Math.hypot(offsetX, offsetY) < DRAG_THRESHOLD) {
         return
@@ -130,9 +168,10 @@ function startGesture(
     }
 
     // One instant call, because with `scroll-behavior: smooth` a second scroll would interrupt the first.
+    // The other axes are left out, so that their scroll positions stay wherever the page puts them.
     element.scrollTo({
-      left: start.scrollLeft - offsetX,
-      top: start.scrollTop - offsetY,
+      ...(axes.x && { left: start.scrollLeft - offsetX }),
+      ...(axes.y && { top: start.scrollTop - offsetY }),
       behavior: "instant",
     })
   }
@@ -205,22 +244,32 @@ function suppressClickAfterRelease(
   release: PointerEvent,
   onRelease: () => void,
 ) {
+  let suppressions = releaseSuppressions.get(release)
+  if (!suppressions) {
+    suppressions = new Set()
+    releaseSuppressions.set(release, suppressions)
+  }
+
   const preventClick = (event: MouseEvent) => {
     if (release.eventPhase !== Event.NONE) {
       return
     }
     event.preventDefault()
     event.stopPropagation()
-    stop()
+    for (const stopSuppression of suppressions) {
+      stopSuppression()
+    }
   }
   const stop = () => {
     clearTimeout(timeout)
     element.removeEventListener("click", preventClick, { capture: true })
+    suppressions.delete(stop)
     onRelease()
   }
 
   // The click follows the release in the same task; if no click follows, the timeout removes the listener.
   element.addEventListener("click", preventClick, { capture: true })
   const timeout = setTimeout(stop)
+  suppressions.add(stop)
   return stop
 }
