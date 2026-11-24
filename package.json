@@ -35,7 +35,7 @@
     "types": "bun check && bun check -p tests"
   },
   "dependencies": {
-    "@vueuse/core": "^15.1.0"
+    "@vueuse/core": "^14.0.0 || ^15.0.0"
   },
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.5",
