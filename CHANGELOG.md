@@ -1,5 +1,11 @@
 # vue-grab-scroll
 
+## 1.2.0
+
+### Minor Changes
+
+- 0fd4f0f: Mark a container with the `data-grab-scrolling` attribute during a drag, so that stylesheets can show a grabbing cursor.
+
 ## 1.1.0
 
 ### Minor Changes
