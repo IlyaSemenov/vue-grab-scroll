@@ -1,6 +1,6 @@
 {
   "name": "vue-grab-scroll",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Vue composable and directive that scroll a container when the user drags it with the mouse.",
   "homepage": "https://github.com/IlyaSemenov/vue-grab-scroll#readme",
   "bugs": "https://github.com/IlyaSemenov/vue-grab-scroll/issues",
