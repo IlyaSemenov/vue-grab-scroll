@@ -374,17 +374,54 @@ describe("styles", () => {
   })
 })
 
+describe("dragging attribute", () => {
+  it("marks the container from the drag threshold until the release", () => {
+    dispatchPointer(link, "pointerdown", start)
+    dispatchPointer(link, "pointermove", { x: 203, y: 203 })
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(false)
+
+    dispatchPointer(link, "pointermove", { x: 205, y: 200 })
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(true)
+
+    dispatchPointer(link, "pointerup", { x: 205, y: 200 })
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(false)
+  })
+
+  it("marks only the nested containers that took an axis of the drag", () => {
+    const middle = document.createElement("div")
+    const inner = document.createElement("div")
+    container.append(middle)
+    middle.append(inner)
+    scope.run(() => {
+      useGrabScroll(shallowRef(middle), { axis: "y" })
+      useGrabScroll(shallowRef(inner), { axis: "x" })
+    })
+
+    dispatchPointer(inner, "pointerdown", start)
+    dispatchPointer(inner, "pointermove", { x: 150, y: 150 })
+    expect(inner.hasAttribute("data-grab-scrolling")).toBe(true)
+    expect(middle.hasAttribute("data-grab-scrolling")).toBe(true)
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(false)
+
+    dispatchPointer(inner, "pointerup", { x: 150, y: 150 })
+    expect(inner.hasAttribute("data-grab-scrolling")).toBe(false)
+    expect(middle.hasAttribute("data-grab-scrolling")).toBe(false)
+  })
+})
+
 describe("ending a drag early", () => {
   /** Starts a drag on the link and moves the mouse past the drag threshold. */
   function startDrag() {
     dispatchPointer(link, "pointerdown", start)
     dispatchPointer(link, "pointermove", end)
     expect(container.style.userSelect).toBe("none")
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(true)
   }
 
   /** Checks that the drag ended without further scrolling and without suppressing a click. */
   function expectDragCancelled() {
     expect(container.style.userSelect).toBe("")
+    expect(container.hasAttribute("data-grab-scrolling")).toBe(false)
     const { scrollLeft } = container
     dispatchPointer(link, "pointermove", { x: 50, y: 50 })
     expect(container.scrollLeft).toBe(scrollLeft)

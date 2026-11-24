@@ -66,6 +66,29 @@ useGrabScroll(board, { ignore: ".movable" })
 The selector is tested against the pressed element and each ancestor up to and including the grab-scroll container.
 The composable also accepts a ref of either; a change applies from the next press.
 
+### Showing a grabbing cursor
+
+To show a grabbing cursor during a drag, style the container's `data-grab-scrolling` attribute:
+
+```css
+[data-grab-scrolling],
+[data-grab-scrolling] * {
+  cursor: grabbing;
+}
+```
+
+The attribute appears only once a press becomes a drag, so a click does not change the cursor.
+
+When the mouse leaves the container during a drag, the cursor follows the elements under it.
+To keep the grabbing cursor outside the container, add this rule to a global stylesheet rather than a scoped `<style>`:
+
+```css
+:root:has([data-grab-scrolling]),
+:root:has([data-grab-scrolling]) * {
+  cursor: grabbing !important;
+}
+```
+
 ## Behavior
 
 Dragging with the primary mouse button scrolls the container along each of its axes where its content overflows; touch screens keep their native scrolling.

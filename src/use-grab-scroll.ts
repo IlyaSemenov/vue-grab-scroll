@@ -40,6 +40,9 @@ const DRAG_THRESHOLD = 5
  */
 const DRAG_STYLES = ["scroll-snap-type", "user-select"] as const
 
+/** Attribute that a container has during a drag. */
+const DRAGGING_ATTRIBUTE = "data-grab-scrolling"
+
 /** Axes of presses that containers have already taken, so that the containers around them scroll only along the other axes. */
 const claimedAxes = new WeakMap<PointerEvent, Axes>()
 
@@ -58,6 +61,8 @@ const ignoredPresses = new WeakSet<PointerEvent>()
  *
  * The container scrolls along both axes, unless `axis` limits it to one; an axis along which the container does not overflow stays still.
  * When nested containers use it, each axis goes to the innermost container that selected it, even if its content fits.
+ *
+ * During a drag, the container has the `data-grab-scrolling` attribute, for example to show a grabbing cursor.
  *
  * Only the mouse is handled, because touch screens scroll the container natively.
  * The click that ends a drag is suppressed, so that it does not activate links or buttons inside the container.
@@ -212,15 +217,15 @@ function startGesture(
     scrollLeft: element.scrollLeft,
     scrollTop: element.scrollTop,
   }
-  let restoreStyles: (() => void) | undefined
+  let unmarkDragging: (() => void) | undefined
   let ended = false
 
   const end = (release?: PointerEvent) => {
     ended = true
     view.removeEventListener("pointermove", onMove, { capture: true })
-    const dragged = Boolean(restoreStyles)
-    restoreStyles?.()
-    restoreStyles = undefined
+    const dragged = Boolean(unmarkDragging)
+    unmarkDragging?.()
+    unmarkDragging = undefined
     onEnd(dragged ? release : undefined)
   }
 
@@ -233,11 +238,11 @@ function startGesture(
     // Moves along the other axes neither start a drag nor scroll.
     const offsetX = axes.x ? event.clientX - start.x : 0
     const offsetY = axes.y ? event.clientY - start.y : 0
-    if (!restoreStyles) {
+    if (!unmarkDragging) {
       if (Math.hypot(offsetX, offsetY) < DRAG_THRESHOLD) {
         return
       }
-      restoreStyles = overrideStyles(element)
+      unmarkDragging = markDragging(element)
       view.getSelection()?.removeAllRanges()
     }
 
@@ -315,6 +320,16 @@ function watchPressEnd(
   // Not in the capture phase, which would also catch elements losing focus.
   view.addEventListener("blur", onBlur)
   return stop
+}
+
+/** Applies the drag styles and the dragging attribute to the element, and returns the function that restores the styles and removes the attribute. */
+function markDragging(element: HTMLElement): () => void {
+  const restoreStyles = overrideStyles(element)
+  element.setAttribute(DRAGGING_ATTRIBUTE, "")
+  return () => {
+    restoreStyles()
+    element.removeAttribute(DRAGGING_ATTRIBUTE)
+  }
 }
 
 /**
