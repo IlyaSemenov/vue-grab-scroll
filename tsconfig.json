@@ -1,0 +1,10 @@
+{
+  "extends": "@tsconfig/bun",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src/**/*.ts", "*.ts"]
+}
